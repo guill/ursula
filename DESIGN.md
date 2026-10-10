@@ -1,0 +1,241 @@
+# Ursula Design
+
+This document is meant to be the design proposal for Ursula -- a service intended to make voice transcription easily and efficiently supported on Linux systems (including WSL2).
+
+## Problem Statement
+As AI becomes more proficient, being able to interact with it via voice is becoming more important. People are looking for things like:
+
+1. Integration with NeoVim to type what I say when a keybinding is pressed.
+2. Adding a WM-level key binding that records what I say and feeds it to a custom AI agent script.
+3. Adding a WM-level key binding that records what I say and types it in the active window.
+
+The goal of Ursula is not to directly implement these things -- it's to provide the API and bindings that make it easy for someone to add voice support to whatever plugin-enabled app they want to.
+
+### Existing Alternatives
+
+One alternative used for NeoVim today is vocal.nvim. It works by invoking a Python script which records an audio clip and then loads a whisper model to transcribe it before feeding the info back to NeoVim. There are a couple issues with this method:
+
+1. We have to reload the voice model every time.
+2. We don't start transcribing until the entire audio clip is recorded.
+3. It's fairly specific to NeoVim and we'd load up an entire copy of it to run transcription for another application.
+
+### Design Goals
+The following are design goals, but *not* necessarily hard requirements. If we can achieve all of them we should. If we can't, we should discuss which are worth cutting.
+
+- Accuracy
+    - Transcription should be high accuracy
+    - We should be able to feed additional context to the service to help it transcribe accurately when the model used allows this.
+- Portability
+    - We should support CPU-only models, though may also want to add stronger GPU-powered models
+    - The API should be provided in a way that's relatively easy to integrate with different applications and languages (e.g. an HTTP API, named pipes, or something similar). For example, I would like the NeoVim plugin using it to work entirely in Lua without any necessary Python subshells.
+    - First-class support for Nix and NixOS. Include a flake for both development, running on demand, and running as a service.
+- Speed
+    - We should be able to keep the model loaded so that transcription is very fast.
+    - We should support beginning to transcribe before the speaker is finished speaking (e.g. by chunking). API should support both the option of streaming results and getting all text at once when it's done.
+- Extendability
+    - The system should be extendable. E.g. someone might want to have a fast LLM like Haiku clean up the text/punctuation on finish.
+    - The system shouldn't be *too* tied to a specific model. In particular, we should be able to change the model without changing any of the integrations that use our API in the future. We *don't* necessarily need to support multiple models at once.
+
+### Suggestions
+These are suggestions based on my research, but if you have better ideas you should push back.
+- `Parakeet TDT 0.6B v2 (English)` seems like a strong contender as the model.
+- `Nemotron Streaming 0.6B` may have better streaming support, but also appears to be less accurate.
+- Running as a persistent service is likely the best way to do this, though we should be conscious of memory usage.
+- We should evaluate whether Ursula itself should handle recording from a microphone or if there's an easy way for different languages to stream audio data from a microphone to Ursula.
+- `sherpa-onnx` may be worth looking at, either to power Ursula or just to get ideas on implementation from
+- To allows for 'streaming' in offline models, one option is using something like Silero VAD to find speech segments and then run the offline model on each segment.
+
+## Decisions
+
+| Topic | Decision |
+|---|---|
+| Model (v1) | Parakeet TDT 0.6B v2, int8 ONNX (`sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`, ~480 MB). Config-selectable so v3 (multilingual) is a drop-in. |
+| Streaming strategy | Silero VAD splits audio into speech segments; each finished segment is decoded by the offline model. Nemotron streaming (WER 6.93 vs 6.05 at best chunk size) is a possible future engine behind the same API. |
+| Runtime | sherpa-onnx (in nixpkgs, 1.13.x) via the official `sherpa-onnx` Rust crate. |
+| Language | Rust. One binary, `ursula`, which is both the daemon (`ursula serve`) and the CLI client. |
+| Audio capture | Ursula captures from the mic itself via **libpulse** (works on PulseAudio, PipeWire via pipewire-pulse, and WSLg). The mic is opened **only while a session is active**. Pushed PCM and WAV files are secondary inputs. |
+| Transport | Newline-delimited JSON (NDJSON) over a Unix socket at `$XDG_RUNTIME_DIR/ursula.sock`, mode `0600`. File permissions are the auth. No TCP in v1. |
+| Concurrency | One session at a time, globally. A second `start` gets a `busy` error. |
+| Streamed output | Final (never-revised) `segment` events, then `done`. A `partial` event is reserved in the schema for a future true-streaming engine. |
+| Context | Per-request `hotwords` (list) and `context` (free text), plus a global hotword list in config. Hotwords bias the model only when supported and enabled; everything is always passed to post-processors. |
+| Extensibility | Named post-processors defined in config as external commands, JSON on stdin and stdout, chained in order, applied to final text only. |
+| Memory | Model loaded at startup and kept resident. To free memory, stop the service. |
+| Model delivery | Nix fixed-output derivations, pinned by hash. Non-Nix users point config at a directory (a download script is provided). |
+| Service | systemd **user** service, which can reach the user's audio session and `$XDG_RUNTIME_DIR`. |
+| Performance target | None fixed. Benchmark stop-to-text latency and resident memory in M1 and record them here. |
+
+## Architecture
+
+```
+            ┌──────────────── ursula serve ─────────────────────────────┐
+ client ──► │ socket thread(s) ──► session controller (single session)  │
+ (NDJSON)   │                         │                                 │
+            │      AudioSource ───────┤  mic (libpulse) | push | WAV    │
+            │                         ▼                                 │
+            │      Engine (trait) ── accept(samples) / finish()         │
+            │        └─ VadOfflineEngine: Silero VAD → Parakeet TDT     │
+            │                         │  segment events                 │
+            │                         ▼                                 │
+            │      post-processor chain (external commands, on done)    │
+            └──────────────────────────┬────────────────────────────────┘
+                                       ▼
+                         events → owning client connection
+```
+
+- **Engine** is the single seam for model independence. Everything downstream consumes its events.
+  ```rust
+  trait Engine {
+      fn begin(&mut self, hotwords: &[String]);      // new session
+      fn accept(&mut self, samples: &[f32]) -> Vec<EngineEvent>; // 16 kHz mono f32
+      fn finish(&mut self) -> Vec<EngineEvent>;      // flush VAD, decode tail
+  }
+  enum EngineEvent { Segment { text: String, start: f32, end: f32 }, Partial { text: String } }
+  ```
+  `VadOfflineEngine` is the only v1 implementation. A Nemotron `OnlineRecognizer` engine would emit `Partial` and `Segment` events without any API change.
+- **Threads:** one inference thread owns the recognizer (the model is never shared). The audio thread feeds it through a channel. Socket handling uses std threads (`std::os::unix::net`); there are too few clients to justify an async runtime.
+- **Mic lifecycle:** open the PulseAudio record stream on `start`, close it on `stop`/`cancel`/`done`. If the stream errors or delivers no data for 2 s, end the session with `error: audio_unavailable` and keep the daemon running. This matters for the WSLg regressions noted below.
+- **Session ownership:** the session's events go to the connection that sent `start`. `stop` and `cancel` are accepted from **any** connection, because there is only one session. This lets a WM toggle keybinding run as two separate processes (see CLI). If the owning connection drops, the session is cancelled so the mic is never left open.
+
+## API
+
+Transport: connect to `$XDG_RUNTIME_DIR/ursula.sock`. Every message is one JSON object per line. Requests may carry an optional `"id"`, which is echoed on the replies to that request.
+
+### Requests (client → daemon)
+
+**`start`**: begin a session.
+```json
+{"op": "start",
+ "source": "mic",               // "mic" | "push" | {"file": "/abs/path.wav"}
+ "stream": true,                // emit segment events (default false: only done)
+ "hotwords": ["NixOS", "sherpa-onnx"],
+ "context": "Editing a Rust file about audio capture.",
+ "postprocess": ["cleanup"],    // names from config, run in order
+ "max_ms": 120000,              // hard cap; default from config
+ "silence_stop_ms": 1500}       // optional, nice-to-have: auto-stop after trailing silence
+```
+
+**`audio`**: only for `source: "push"`. The payload is base64-encoded **16 kHz mono s16le** PCM.
+```json
+{"op": "audio", "data": "<base64>"}
+```
+
+**`stop`**: stop capturing and finalize (decode the tail, run post-processors, send `done`).
+**`cancel`**: discard. No transcription is returned.
+**`status`**: returns daemon state.
+```json
+{"op": "stop"}   {"op": "cancel"}   {"op": "status"}
+```
+
+For `{"file": ...}` sources, the session ends on its own at end of file. v1 accepts only 16 kHz mono 16-bit PCM WAV and rejects anything else with a `bad_audio` error that suggests an `ffmpeg` command. Push and file inputs feed audio faster than real time, so file transcription is fast.
+
+### Events (daemon → client)
+
+```json
+{"event": "started", "session": "s-17", "model": "parakeet-tdt-0.6b-v2"}
+{"event": "segment", "session": "s-17", "text": "Open the config file", "start": 0.42, "end": 2.10}
+{"event": "partial", "session": "s-17", "text": "..."}            // reserved, not emitted in v1
+{"event": "done", "session": "s-17",
+ "text": "Open the config file.",       // after post-processing
+ "raw_text": "Open the config file",    // before post-processing
+ "segments": [{"text": "...", "start": 0.42, "end": 2.10}],
+ "audio_ms": 2600,
+ "reason": "stop",                      // stop | silence | max_duration | end_of_file
+ "warnings": ["hotwords ignored: not enabled for this model"]}
+{"event": "cancelled", "session": "s-17"}
+{"event": "status", "model": "parakeet-tdt-0.6b-v2", "busy": false, "version": "0.1.0",
+ "capabilities": {"hotwords": false, "partials": false}}
+{"event": "error", "code": "busy", "message": "a session is already active"}
+```
+
+Error codes: `busy`, `no_session`, `bad_request`, `bad_audio`, `audio_unavailable`, `unknown_postprocessor`. Post-processor failure is **not** an error, so speech is never lost: `done` still carries the last good text plus a warning.
+
+`segment.text` is never revised. `done.text` is the authoritative result, because post-processing may rewrite it.
+
+### Post-processor protocol
+
+Each post-processor is an external command, spawned once per `done`.
+- stdin, one JSON object: `{"text": "...", "context": "...", "hotwords": [...], "segments": [...]}`
+- stdout, one JSON object: `{"text": "..."}`
+
+Post-processors are chained: each one's `text` becomes the next one's input. If a post-processor exits non-zero, emits invalid JSON, or exceeds its timeout (default 10 s), it is skipped with a warning.
+
+### CLI (`ursula`)
+
+The CLI is a thin client over the same socket. It covers use cases 2 and 3 without writing any code.
+
+| Command | Behavior |
+|---|---|
+| `ursula serve` | Run the daemon. |
+| `ursula record [--stream] [--post NAME]... [--hotword W]... [--context TEXT] [--silence-stop MS]` | Start a mic session and block. Prints the final text to stdout (or one segment per line with `--stream`). Ctrl-C sends `stop`. |
+| `ursula stop` / `ursula cancel` | Stop or cancel the active session. The `record` process prints the result. |
+| `ursula toggle [record flags]` | `stop` if a session is active, else `record`. This is the single WM keybinding. |
+| `ursula file PATH.wav` | Transcribe a file and print the text. |
+| `ursula status` | Print the status JSON. |
+| `ursula raw` | Pipe NDJSON from stdin to the socket and print events, for debugging. |
+
+Example WM binding for use case 3: `ursula toggle | wtype -` (or `xdotool type --file -`). The first press records; the second press makes that same process print and pipe the text.
+
+### NeoVim (reference client)
+
+`lua/ursula/init.lua` lives in this repo and uses only `vim.uv.new_pipe()`: connect, write the `start` line, insert `segment` text as it arrives (or `done.text` if post-processors are used), send `stop` on the second keypress. It passes the current filetype and the nearby buffer lines as `context`. It has no external processes.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/ursula/config.toml`. All fields are optional except the model paths, which the Nix modules generate.
+
+```toml
+[model]
+kind = "parakeet-tdt"            # selects the Engine implementation and recognizer config
+dir = "/nix/store/...-parakeet-tdt-0.6b-v2-int8"
+threads = 4
+provider = "cpu"                 # "cuda" needs the ursula-cuda package
+
+[vad]
+model = "/nix/store/...-silero-vad/silero_vad.onnx"
+threshold = 0.5
+min_silence_ms = 500
+max_speech_ms = 20000            # longer speech is force-split into segments
+
+[session]
+max_ms = 300000
+
+[hotwords]
+enabled = false                  # see Risks: upstream TDT hotword bug, needs bpe.vocab
+score = 1.5
+words = ["NixOS", "Ursula"]      # merged with per-request hotwords
+
+[postprocessors.cleanup]
+command = ["/home/me/bin/haiku-cleanup"]
+timeout_ms = 10000
+```
+
+## Nix
+
+Flake outputs:
+- `packages.default`: `ursula`, built against nixpkgs `sherpa-onnx` with `SHERPA_ONNX_LIB_DIR` set and the crate's `shared` feature. Without that, the crate's `build.rs` downloads binaries and fails in the sandbox.
+- `packages.ursula-cuda`: the same, against `sherpa-onnx.override { cudaSupport = true; }`. This is unfree and slow to build without a CUDA cache.
+- `packages.models.{parakeet-tdt-0.6b-v2-int8, parakeet-tdt-0.6b-v3-int8, silero-vad}`: fixed-output derivations of the pinned sherpa-onnx release tarballs.
+- `apps.default`: `nix run` starts `ursula serve` with a generated default config.
+- `devShells.default`: Rust toolchain, `sherpa-onnx`, `libpulseaudio`, `pkg-config`, the env vars, and model paths exported.
+- `homeManagerModules.default`: `services.ursula = { enable; package; model; settings; }`. It generates the config and a systemd user unit.
+- `nixosModules.default`: the same options, defining `systemd.user.services.ursula` for all users.
+- `checks`: build, `cargo test`, and an end-to-end test that runs `ursula file` on a bundled sample WAV and asserts the expected text.
+
+## Milestones
+
+1. **Core:** `ursula serve` plus `file` and `push` sources, VadOfflineEngine, the NDJSON protocol, the CLI, and the flake package and devShell. Measure latency and RSS on target hardware and record them here.
+2. **Mic:** libpulse capture, stop/cancel/toggle, max duration, stall detection, tested on NixOS (PipeWire) and WSL2 (WSLg).
+3. **Service:** home-manager and NixOS modules, post-processors, config hotword list.
+4. **Clients:** NeoVim reference plugin, example WM bindings.
+5. **Nice-to-have:** `silence_stop_ms`, enabling hotwords once upstream is fixed, CUDA package, Nemotron engine.
+
+## Risks and Open Questions
+
+- **Hotwords on Parakeet TDT:** sherpa-onnx supports NeMo-transducer hotwords via `modified_beam_search`, but two things block it today. The published model packages lack the required `bpe.vocab`, which would have to be generated with upstream `scripts/nemo/generate_bpe_vocab.py` and shipped in the model derivation. There is also an open bug where TDT plus `modified_beam_search` yields empty or "Yeah." output on about 20% of utterances (fix in k2-fsa/sherpa-onnx#3657, unmerged as of 2026-10). Hotwords therefore ship disabled. The API accepts them anyway, and they always reach post-processors.
+- **WSL2 microphone:** WSLg exposes the Windows mic as PulseAudio source `RDPSource`. There is no ALSA, and the Windows mic privacy setting must allow desktop apps. Recent open WSLg issues (#1482, #1508) report capture stalls. Mitigations are stall detection plus a clear error. A possible fallback is a small Windows-side capture tool that uses the `push` source. Not in v1.
+- **Opening the mic on demand** may clip the first ~50–100 ms of speech while the stream opens. Measure in M2. If it's a problem, add a short configurable keep-open linger after each session rather than recording all the time.
+- **Memory:** there is no published figure for int8 Parakeet resident memory; estimated at ~0.7–1 GB. Measure in M1.
+- **Simplifications** (known ceilings, upgrade path in parentheses):
+  - Push input is 16 kHz s16le only (add a `rate` field and resample).
+  - File input is 16 kHz WAV only (resample or decode other formats).
+  - One session at a time (add per-session engines if ever needed).
