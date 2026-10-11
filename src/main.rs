@@ -3,6 +3,9 @@ use std::process::exit;
 
 use clap::{Args, Parser, Subcommand};
 
+#[allow(dead_code)] // TODO(wiring todo): remove once `serve` calls config::load.
+mod config;
+
 /// Local speech-to-text daemon and client.
 #[derive(Parser, Debug)]
 #[command(name = "ursula", version)]
