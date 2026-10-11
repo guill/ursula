@@ -62,6 +62,35 @@
         }
       );
 
+      checks = forSystems (
+        system:
+        let
+          inherit (perSystem system) craneLib models ursula;
+          inherit (ursula.passthru) common cargoArtifacts;
+        in
+        {
+          build = ursula;
+          clippy = craneLib.cargoClippy (
+            common
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+            }
+          );
+          # Unit tests plus the model-backed e2e tests (stdenv already provides sh/coreutils).
+          test = craneLib.cargoTest (
+            common
+            // {
+              inherit cargoArtifacts;
+              URSULA_E2E_MODEL_DIR = "${models.parakeet-tdt-0_6b-v2-int8}";
+              URSULA_E2E_VAD = "${models.silero-vad}/silero_vad.onnx";
+              # Show `skipped:` lines (and measured latencies) in the build log.
+              cargoTestExtraArgs = "-- --nocapture";
+            }
+          );
+        }
+      );
+
       devShells = forSystems (
         system:
         let
