@@ -13,14 +13,14 @@ Speech is split by Silero VAD and each finished segment is decoded by the offlin
 Run the daemon once, with a generated default config:
 
 ```sh
-nix run github:OWNER/ursula            # or `nix run .` in a checkout
+nix run github:guill/ursula            # or `nix run .` in a checkout
 ```
 
 home-manager (`services.ursula.autoStart` defaults to `true`):
 
 ```nix
 {
-  inputs.ursula.url = "github:OWNER/ursula";
+  inputs.ursula.url = "github:guill/ursula";
   # in your home-manager configuration:
   imports = [ ursula.homeManagerModules.default ];
   services.ursula = {
@@ -102,20 +102,22 @@ Text goes to stdout, so a binding can pipe it straight into a typing tool. The f
 sway / i3 (Wayland, needs `wtype`):
 
 ```
-bindsym $mod+v exec ursula toggle | wtype -
+bindsym $mod+v exec ursula toggle | tr -d '\n' | wtype -
 ```
 
 Hyprland:
 
 ```
-bind = SUPER, V, exec, ursula toggle | wtype -
+bind = SUPER, V, exec, ursula toggle | tr -d '\n' | wtype -
 ```
 
 X11:
 
 ```
-bindsym $mod+v exec ursula toggle | xdotool type --file -
+bindsym $mod+v exec ursula toggle | tr -d '\n' | xdotool type --file -
 ```
+
+`ursula toggle` prints the transcript plus a trailing newline, so the typing bindings strip it with `tr -d '\n'` to avoid pressing Enter. An agent usually wants the newline, so that example keeps it.
 
 Feed an AI agent through a post-processor named `cleanup`:
 
