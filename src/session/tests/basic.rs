@@ -116,6 +116,24 @@ fn t15_hotwords_disabled_warning() {
 }
 
 #[test]
+fn t26_nul_and_empty_hotwords_dropped() {
+    let mut h = h(FakeMode::EverySecond);
+    let words = r#"["ok","bad\u0000word",""]"#;
+    h.req(
+        1,
+        &format!(r#"{{"op":"start","source":"push","postprocess":["p"],"hotwords":{words}}}"#),
+    );
+    assert_eq!(h.log().hotwords, ["ok"]);
+    let outs = h.req(1, STOP);
+    let Some(Output::RunPost { job, .. }) =
+        outs.iter().find(|o| matches!(o, Output::RunPost { .. }))
+    else {
+        panic!("no RunPost: {:?}", tags(&outs));
+    };
+    assert_eq!(job.hotwords, ["ok"]);
+}
+
+#[test]
 fn t16_id_echo() {
     let mut h = h(FakeMode::EverySecond);
     let outs = h.req(1, r#"{"op":"start","source":"push","id":"a"}"#);

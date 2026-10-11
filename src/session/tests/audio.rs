@@ -191,3 +191,24 @@ fn t23_silence_cut() {
     assert_eq!(h.log().samples, 64 * 512);
     assert_eq!(done["audio_ms"], 64 * 512 * 1000 / 16000);
 }
+
+#[test]
+fn t25_huge_ms_values_saturate() {
+    let (engine, log) = FakeEngine::new(FakeMode::EverySecond);
+    let mut cfg = cfg();
+    cfg.session.max_ms = u64::MAX;
+    let mut h = H {
+        ctl: Controller::new(Box::new(engine), cfg),
+        log,
+        now: 0,
+    };
+    let start = format!(
+        r#"{{"op":"start","source":"push","silence_stop_ms":{},"max_ms":{}}}"#,
+        1u64 << 60,
+        i64::MAX
+    );
+    h.req(1, &start);
+    let outs = h.push(1, &[speech(16000), zeros(64000)].concat());
+    assert!(sent(&outs, 1).iter().all(|v| v["event"] != "done"));
+    assert_eq!(one(&h.req(1, STOP), 1, "done")["reason"], "stop");
+}

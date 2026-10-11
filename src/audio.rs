@@ -63,6 +63,12 @@ pub fn decode_push(b64: &str) -> Result<Vec<f32>, String> {
 
 /// Opens a WAV file and checks its header; samples are read later by the feeder.
 pub fn open_wav(path: &Path) -> Result<WavReader<BufReader<File>>, String> {
+    // Opening a FIFO blocks the controller until a writer appears. Racy (TOCTOU), but
+    // only the socket's own user can swap the path.
+    let meta = std::fs::metadata(path).map_err(|e| format!("bad_audio: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("bad_audio: not a regular file: {}", path.display()));
+    }
     let reader = WavReader::open(path).map_err(|e| format!("bad_audio: {e}"))?;
     let s = reader.spec();
     if (
@@ -200,6 +206,24 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.starts_with("bad_audio: "), "{err}");
+    }
+
+    #[test]
+    fn wav_fifo_or_dir_is_rejected_promptly() {
+        let dir = std::env::temp_dir().join(format!("ursula-audio-{}-fifo", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("f.wav");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success());
+        for path in [fifo, dir.clone()] {
+            let (tx, rx) = mpsc::channel();
+            let p = path.clone();
+            thread::spawn(move || tx.send(open_wav(&p).err()));
+            let err = rx.recv_timeout(std::time::Duration::from_secs(2));
+            let want = format!("bad_audio: not a regular file: {}", path.display());
+            assert_eq!(err, Ok(Some(want)));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

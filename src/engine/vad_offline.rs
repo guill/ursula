@@ -95,9 +95,9 @@ impl VadOfflineEngine {
         let samples = |ms: u64| usize::try_from(ms).unwrap_or(usize::MAX).saturating_mul(16);
         let max_speech_samples = samples(v.max_speech_ms);
         // sherpa starts a segment up to 2 windows + min_speech before its first speech window.
-        let preroll = 2 * WINDOW + samples(v.min_speech_ms);
+        let preroll = samples(v.min_speech_ms).saturating_add(2 * WINDOW);
         let flush_at = max_speech_samples
-            .saturating_sub(preroll + WINDOW)
+            .saturating_sub(preroll.saturating_add(WINDOW))
             .max(WINDOW);
         Ok(Self {
             recognizer,

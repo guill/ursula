@@ -90,6 +90,12 @@ fn stdin_carries_the_protocol_json() {
 }
 
 #[test]
+fn huge_timeout_does_not_panic() {
+    let (text, warnings, _) = run(job("in", vec![sh(ECHO_X, u64::MAX)]));
+    assert_eq!((text.as_str(), warnings), ("X", vec![]));
+}
+
+#[test]
 fn nonzero_exit_warns_and_keeps_text() {
     let (text, warnings, _) = run(job("in", vec![sh("exit 3", 5000)]));
     assert_eq!(

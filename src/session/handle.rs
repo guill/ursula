@@ -71,6 +71,11 @@ impl Controller {
 
         self.gen += 1;
         let gen = self.gen;
+        // sherpa needs C strings (NUL would panic it); empty words are noise.
+        let hotwords: Vec<String> = hotwords
+            .into_iter()
+            .filter(|w| !w.is_empty() && !w.contains('\0'))
+            .collect();
         self.engine.begin(&hotwords);
         self.residual.clear();
         let mut words = self.cfg.hotwords.words.clone();
@@ -96,8 +101,9 @@ impl Controller {
             context,
             post_names: postprocess,
             started_ms: self.now,
-            max_samples: cap_ms * SAMPLES_PER_MS,
-            silence_stop_samples: silence_stop_ms.map(|ms| ms * SAMPLES_PER_MS),
+            // Untrusted ms values: saturate (u64::MAX samples is "never").
+            max_samples: cap_ms.saturating_mul(SAMPLES_PER_MS),
+            silence_stop_samples: silence_stop_ms.map(|ms| ms.saturating_mul(SAMPLES_PER_MS)),
             accepted: 0,
             processed: 0,
             last_voice_at: 0,
