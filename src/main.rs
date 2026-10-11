@@ -5,6 +5,8 @@ use clap::{Args, Parser, Subcommand};
 
 #[allow(dead_code)] // TODO(wiring todo): remove once `serve` calls config::load.
 mod config;
+#[allow(dead_code)]
+mod protocol;
 
 /// Local speech-to-text daemon and client.
 #[derive(Parser, Debug)]
