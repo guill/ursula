@@ -14,9 +14,11 @@ mod config;
 #[allow(dead_code)]
 mod engine;
 #[allow(dead_code)]
-mod protocol;
+mod mic;
 #[allow(dead_code)]
 mod postprocess;
+#[allow(dead_code)]
+mod protocol;
 #[allow(dead_code)]
 mod sys;
 
