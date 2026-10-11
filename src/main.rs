@@ -20,6 +20,8 @@ mod postprocess;
 #[allow(dead_code)]
 mod protocol;
 #[allow(dead_code)]
+mod session;
+#[allow(dead_code)]
 mod sys;
 
 /// Local speech-to-text daemon and client.

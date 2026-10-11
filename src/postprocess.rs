@@ -11,31 +11,19 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::Postprocessor;
+use crate::protocol::Segment;
 use crate::sys;
 
 const MAX_OUTPUT: u64 = 1 << 20;
 const POLL: Duration = Duration::from_millis(20);
 
-/// Local stand-in for the `[postprocessors.<name>]` config entry; same name and fields.
-pub struct PostprocessorCfg {
-    pub command: Vec<String>,
-    pub timeout_ms: u64,
-}
-
-/// Local stand-in for the protocol segment; same name and fields.
-#[derive(Serialize)]
-pub struct Seg {
-    pub text: String,
-    pub start: f32,
-    pub end: f32,
-}
-
 pub struct PostJob {
     pub text: String,
     pub context: Option<String>,
     pub hotwords: Vec<String>,
-    pub segments: Vec<Seg>,
-    pub chain: Vec<(String, PostprocessorCfg)>,
+    pub segments: Vec<Segment>,
+    pub chain: Vec<(String, Postprocessor)>,
 }
 
 #[derive(Serialize)]
@@ -43,7 +31,7 @@ struct Input<'a> {
     text: &'a str,
     context: Option<&'a str>,
     hotwords: &'a [String],
-    segments: &'a [Seg],
+    segments: &'a [Segment],
 }
 
 #[derive(Deserialize)]
@@ -79,7 +67,7 @@ pub fn run_chain(job: PostJob, cancel: &AtomicBool) -> (String, Vec<String>) {
     (text, warnings)
 }
 
-fn run_step(cfg: &PostprocessorCfg, input: Vec<u8>, cancel: &AtomicBool) -> Step {
+fn run_step(cfg: &Postprocessor, input: Vec<u8>, cancel: &AtomicBool) -> Step {
     let Some((program, args)) = cfg.command.split_first() else {
         return Step::Warn("could not start: empty command".into());
     };

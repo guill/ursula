@@ -4,22 +4,22 @@ use std::path::PathBuf;
 
 const ECHO_X: &str = r#"cat >/dev/null; echo '{"text":"X"}'"#;
 
-fn step(command: &[&str], timeout_ms: u64) -> (String, PostprocessorCfg) {
+fn step(command: &[&str], timeout_ms: u64) -> (String, Postprocessor) {
     let command = command.iter().map(|s| s.to_string()).collect();
     (
         "t".into(),
-        PostprocessorCfg {
+        Postprocessor {
             command,
             timeout_ms,
         },
     )
 }
 
-fn sh(script: &str, timeout_ms: u64) -> (String, PostprocessorCfg) {
+fn sh(script: &str, timeout_ms: u64) -> (String, Postprocessor) {
     step(&["sh", "-c", script], timeout_ms)
 }
 
-fn job(text: &str, chain: Vec<(String, PostprocessorCfg)>) -> PostJob {
+fn job(text: &str, chain: Vec<(String, Postprocessor)>) -> PostJob {
     PostJob {
         text: text.into(),
         context: None,
@@ -76,7 +76,7 @@ fn stdin_carries_the_protocol_json() {
     );
     j.context = Some("ctx".into());
     j.hotwords = vec!["w".into()];
-    j.segments = vec![Seg {
+    j.segments = vec![Segment {
         text: "a".into(),
         start: 0.0,
         end: 1.5,
