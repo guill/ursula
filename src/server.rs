@@ -164,8 +164,17 @@ impl Runtime {
             if let Input::PostDone { gen, .. } = &input {
                 self.posts.remove(gen);
             }
+            // Peer gone: nothing more can be delivered. The controller only emits CloseConn
+            // for half-closed owners, so drop the entry (and end its writer) here; idempotent.
+            let gone = match &input {
+                Input::ConnClosed(conn) => Some(*conn),
+                _ => None,
+            };
             for out in self.ctl.handle(input, now_ms()) {
                 self.exec(out, &mut pending);
+            }
+            if let Some(conn) = gone {
+                close_now(&self.shared.conns, conn);
             }
         }
     }
