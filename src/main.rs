@@ -6,6 +6,8 @@ use clap::{Args, Parser, Subcommand};
 #[allow(dead_code)] // TODO(wiring todo): remove once `serve` calls config::load.
 mod config;
 #[allow(dead_code)]
+mod engine;
+#[allow(dead_code)]
 mod protocol;
 #[allow(dead_code)]
 mod postprocess;
