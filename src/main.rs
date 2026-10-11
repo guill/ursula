@@ -3,6 +3,11 @@ use std::process::exit;
 
 use clap::{Args, Parser, Subcommand};
 
+#[allow(dead_code)]
+mod postprocess;
+#[allow(dead_code)]
+mod sys;
+
 /// Local speech-to-text daemon and client.
 #[derive(Parser, Debug)]
 #[command(name = "ursula", version)]
