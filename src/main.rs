@@ -7,6 +7,10 @@ use clap::{Args, Parser, Subcommand};
 mod config;
 #[allow(dead_code)]
 mod protocol;
+#[allow(dead_code)]
+mod postprocess;
+#[allow(dead_code)]
+mod sys;
 
 /// Local speech-to-text daemon and client.
 #[derive(Parser, Debug)]
