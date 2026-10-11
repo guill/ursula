@@ -23,7 +23,8 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           craneLib = crane.mkLib pkgs;
-          models = pkgs.callPackage ./nix/models.nix { };
+          # Plain import: callPackage would add non-derivation override attrs to `packages`.
+          models = import ./nix/models.nix { inherit (pkgs) fetchurl stdenvNoCC; };
           ursula = pkgs.callPackage ./nix/package.nix { inherit craneLib; };
         in
         {
