@@ -1,3 +1,4 @@
+use std::io;
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -5,6 +6,9 @@ use clap::{Args, Parser, Subcommand};
 
 #[allow(dead_code)]
 mod audio;
+use protocol::{Request, Source};
+
+mod client;
 #[allow(dead_code)] // TODO(wiring todo): remove once `serve` calls config::load.
 mod config;
 #[allow(dead_code)]
@@ -72,6 +76,20 @@ struct RecordArgs {
     silence_stop: Option<u64>,
 }
 
+impl RecordArgs {
+    fn start(self) -> Request {
+        Request::Start {
+            source: Source::Mic,
+            stream: self.stream,
+            hotwords: self.hotword,
+            context: self.context,
+            postprocess: self.post,
+            max_ms: None,
+            silence_stop_ms: self.silence_stop,
+        }
+    }
+}
+
 fn socket_path(cli: &Cli) -> PathBuf {
     if let Some(p) = &cli.socket {
         return p.clone();
@@ -87,15 +105,20 @@ fn socket_path(cli: &Cli) -> PathBuf {
 
 fn main() {
     let cli = Cli::parse();
-    let _socket = socket_path(&cli);
-    match cli.command {
+    let socket = socket_path(&cli);
+    let out = &mut io::stdout();
+    let result = match cli.command {
         Command::Serve => todo!(),
-        Command::Record(_) => todo!(),
-        Command::Stop => todo!(),
-        Command::Cancel => todo!(),
-        Command::Toggle(_) => todo!(),
-        Command::File { .. } => todo!(),
-        Command::Status => todo!(),
-        Command::Raw => todo!(),
+        Command::Record(args) => client::record(&socket, args.start(), out),
+        Command::Stop => client::control(&socket, Request::Stop { session: None }),
+        Command::Cancel => client::control(&socket, Request::Cancel { session: None }),
+        Command::Toggle(args) => client::toggle(&socket, args.start(), out),
+        Command::File { path } => client::file(&socket, &path, out),
+        Command::Status => client::status(&socket, out),
+        Command::Raw => client::raw(&socket, io::stdin(), out),
+    };
+    if let Err(line) = result {
+        eprintln!("{line}");
+        exit(1);
     }
 }
