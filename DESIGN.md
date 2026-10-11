@@ -88,12 +88,14 @@ These are suggestions based on my research, but if you have better ideas you sho
       fn begin(&mut self, hotwords: &[String]);      // new session
       fn accept(&mut self, samples: &[f32]) -> Vec<EngineEvent>; // 16 kHz mono f32
       fn finish(&mut self) -> Vec<EngineEvent>;      // flush VAD, decode tail
+      fn in_speech(&self) -> bool;                   // last fed window flagged as speech
+      fn capabilities(&self) -> Capabilities;       // e.g. hotwords support
   }
   enum EngineEvent { Segment { text: String, start: f32, end: f32 }, Partial { text: String } }
   ```
   `VadOfflineEngine` is the only v1 implementation. A Nemotron `OnlineRecognizer` engine would emit `Partial` and `Segment` events without any API change.
-- **Threads:** one controller thread owns the engine (the model is never shared) and the session state machine. Each connection has a reader thread and a writer thread. Feeder threads (file/push) and the mic capture thread send audio into the controller. Post-processors run on their own threads. Supervision ticks (open timeout, stall detection, mic worker) run inside the controller loop, every 100 ms of idle time and after every input; no tick messages are queued. Everything uses std threads (`std::os::unix::net`); there are too few clients to justify an async runtime.
-- **Request ordering:** requests from one connection are processed strictly in the order sent, interleaved with feeder audio through ONE bounded ingress FIFO. Pushed audio therefore always reaches the engine before a later `stop` from the same connection.
+- **Threads:** one controller thread owns the engine (the model is never shared) and the session state machine. Each connection has a reader thread and a writer thread. Pushed audio arrives as `audio` requests through the connection reader and is decoded by the controller; feeder threads exist only for `file` sources, and the mic capture thread feeds `mic` sessions. Post-processors run on their own threads. Supervision ticks (open timeout, stall detection, mic worker) run inside the controller loop, every 100 ms of idle time and after every input; no tick messages are queued. Everything uses std threads (`std::os::unix::net`); there are too few clients to justify an async runtime.
+- **Request ordering:** requests from one connection are processed strictly in the order sent, interleaved with feeder audio through ONE bounded ingress FIFO. Replies to lines that fail to parse (invalid JSON or UTF-8, unknown `op`, line too long) are, like `status`, sent directly by the connection's reader and are not ordered relative to that connection's earlier queued requests. Pushed audio therefore always reaches the engine before a later `stop` from the same connection.
 - **Session states:** `Idle`, `Opening` (mic only, before the stream is ready), `Recording`, `Finishing` (post-processors running). `status.busy` is true in every state except `Idle`. A session has **exactly one terminal event**: `done`, `cancelled`, or an in-session `error`. After it, late input for that session (samples, EOF, failure, post-processor result) is ignored.
 
   | State | `stop` | `cancel` |
@@ -149,12 +151,12 @@ Limits and bad requests: a request line may be at most 1 MiB (excluding the `\n`
 
 `stop` and `cancel` are answered with an `ack` event to the sender, then the session's terminal event goes to its owner (if the sender is the owner it receives both, `ack` first).
 
-For `{"file": ...}` sources, the session ends on its own at end of file. v1 accepts only 16 kHz mono 16-bit PCM WAV and rejects anything else with a `bad_audio` error that suggests an `ffmpeg` command. Push and file inputs feed audio faster than real time, so file transcription is fast.
+For `{"file": ...}` sources, the session ends on its own at end of file. `file` sources must be regular files (otherwise `bad_audio`). v1 accepts only 16 kHz mono 16-bit PCM WAV and rejects anything else with a `bad_audio` error that suggests an `ffmpeg` command. Push and file inputs feed audio faster than real time, so file transcription is fast.
 
 ### Events (daemon → client)
 
 ```json
-{"event": "started", "session": "s-17", "model": "parakeet-tdt-0.6b-v2"}
+{"event": "started", "session": "s-17", "model": "parakeet-tdt-0.6b-v2-int8"}
 {"event": "segment", "session": "s-17", "text": "Open the config file", "start": 0.42, "end": 2.10}
 {"event": "partial", "session": "s-17", "text": "..."}            // reserved, not emitted in v1
 {"event": "done", "session": "s-17",
@@ -166,9 +168,9 @@ For `{"file": ...}` sources, the session ends on its own at end of file. v1 acce
  "warnings": ["hotwords ignored: not enabled for this model"]}
 {"event": "cancelled", "session": "s-17"}
 {"event": "ack", "op": "stop", "session": "s-17", "id": 7}   // reply to stop/cancel
-{"event": "status", "model": "parakeet-tdt-0.6b-v2", "busy": false, "session": null, "version": "0.1.0",
+{"event": "status", "model": "parakeet-tdt-0.6b-v2-int8", "busy": false, "session": null, "version": "0.1.0",
   "capabilities": {"hotwords": false, "partials": false}}
-{"event": "error", "code": "busy", "session": "s-17", "message": "a session is already active"}
+{"event": "error", "code": "busy", "session": "s-17", "message": "session s-17 is active"}
 ```
 
 Session ids are `s-<n>` with `n` a counter starting at 1. `status.session` is the active id or `null`. The `busy` error carries the active session id, so a toggle can't stop the wrong session. In stream mode, segments produced by the final flush are emitted as `segment` events before `done`. `audio_ms` is `floor(accepted_samples * 1000 / 16000)`; padding is never counted. A session with no speech ends with `done` and `text: ""`, `segments: []`.
@@ -215,13 +217,15 @@ Example WM binding for use case 3: `ursula toggle | wtype -` (or `xdotool type -
 [model]
 kind = "parakeet-tdt"            # selects the Engine implementation and recognizer config
 dir = "/nix/store/...-parakeet-tdt-0.6b-v2-int8"
-threads = 4
+name = "parakeet-tdt-0.6b-v2-int8"  # optional; default: dir basename minus "sherpa-onnx-nemo-"
+threads = 4                      # default: min(4, available CPUs)
 provider = "cpu"                 # "cuda" needs the ursula-cuda package
 
 [vad]
 model = "/nix/store/...-silero-vad/silero_vad.onnx"
 threshold = 0.5
 min_silence_ms = 500
+min_speech_ms = 250
 max_speech_ms = 20000            # hard split: no decoded segment exceeds this (engine slices PCM before decoding)
 
 [session]
@@ -230,6 +234,7 @@ max_ms = 300000
 [hotwords]
 enabled = false                  # see Risks: upstream TDT hotword bug, needs bpe.vocab
 score = 1.5
+bpe_vocab = "/path/to/bpe.vocab"  # optional; default <model.dir>/bpe.vocab, must exist when enabled
 words = ["NixOS", "Ursula"]      # merged with per-request hotwords
 
 [postprocessors.cleanup]
@@ -241,20 +246,20 @@ timeout_ms = 10000
 
 Flake outputs:
 - `packages.default`: `ursula`, built against nixpkgs `sherpa-onnx` with `SHERPA_ONNX_LIB_DIR` set and the crate's `shared` feature. Without that, the crate's `build.rs` downloads binaries and fails in the sandbox.
-- `packages.ursula-cuda`: the same, against `sherpa-onnx.override { cudaSupport = true; }`. This is unfree and slow to build without a CUDA cache.
+- `packages.ursula-cuda`: the same, from a separate nixpkgs instance (`pkgsCuda`, `config = { allowUnfree = true; cudaSupport = true; }`), so both sherpa-onnx and onnxruntime are CUDA-enabled. It exists on `x86_64-linux` only, is never part of `checks`, and the default stays CPU. It is unfree and slow to build without a CUDA cache.
 - `packages.<system>.{parakeet-tdt-0_6b-v2-int8, parakeet-tdt-0_6b-v3-int8, silero-vad}`: fixed-output derivations of the pinned sherpa-onnx release tarballs. The names are flat because flakes reject nested package sets.
 - `apps.default`: `nix run` starts `ursula serve` with a generated default config.
 - `devShells.default`: Rust toolchain, `sherpa-onnx`, `libpulseaudio`, `pkg-config`, the env vars, and model paths exported.
 - `homeManagerModules.default`: `services.ursula = { enable; package; model; settings; autoStart; }`. It generates the config and a systemd user unit. `autoStart` (default `true`) controls whether the unit is wanted by `default.target`.
 - `nixosModules.default`: the same options, but `autoStart` defaults to `false` (run `systemctl --user start ursula`), defining `systemd.user.services.ursula` for all users.
-- `checks`: build, `cargo test`, and an end-to-end test that runs `ursula file` on a bundled sample WAV and asserts the expected text.
+- `checks`: `build`, `clippy`, `test` (unit plus model-backed e2e, including `ursula file` on a bundled sample WAV), `mic-e2e`, `nixos-module-off`, `nixos-module-on`, `nixos-module-disabled`, `hm-module-on`, `hm-module-off`, `generated-config`.
 
 ## Milestones
 
 M1–M4 and the `silence_stop_ms` and CUDA package items of M5 are implemented. Hotwords (blocked upstream) and the Nemotron engine are not.
 
 1. **Core:** `ursula serve` plus `file` and `push` sources, VadOfflineEngine, the NDJSON protocol, the CLI, and the flake package and devShell. Measure latency and RSS on target hardware and record them here.
-2. **Mic:** libpulse capture, stop/cancel/toggle, max duration, stall detection, tested on NixOS (PipeWire) and WSL2 (WSLg).
+2. **Mic:** libpulse capture, stop/cancel/toggle, max duration, stall detection, platform validation on real PipeWire and WSL2 (WSLg) pending (see Risks).
 3. **Service:** home-manager and NixOS modules, post-processors, config hotword list.
 4. **Clients:** NeoVim reference plugin, example WM bindings.
 5. **Nice-to-have:** `silence_stop_ms`, enabling hotwords once upstream is fixed, CUDA package, Nemotron engine.
