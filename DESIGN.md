@@ -216,7 +216,7 @@ The CLI is a thin client over the same socket. It covers use cases 2 and 3 witho
 
 Global flags (before or after the subcommand): `--socket PATH` (default `$XDG_RUNTIME_DIR/ursula.sock`) and `--config PATH` (used by `serve`; default `$XDG_CONFIG_HOME/ursula/config.toml`). `--stream` conflicts with `--post`: streamed segments are final and never revised, so they can't also be post-processed. Errors go to stderr with exit status 1 (e.g. `stop` with no session prints the `no_session` error). The daemon holds `<socket>.lock` (never unlinked) so only one runs per socket; a stale socket file is replaced only if it really is a socket.
 
-Example WM binding for use case 3: `ursula toggle | wtype -` (or `xdotool type --file -`). The first press records; the second press makes that same process print and pipe the text.
+Example WM binding for use case 3: `ursula toggle | tr -d '\n' | wtype -` (or `xdotool type --file -`). The first press records; the second press makes that same process print and pipe the text.
 
 ### NeoVim (reference client)
 

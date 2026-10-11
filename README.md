@@ -44,7 +44,7 @@ NixOS (installs a user unit for every user; `autoStart` defaults to `false`, so 
 }
 ```
 
-Don't enable both modules for the same user. Each running daemon keeps about 1 GB of model resident.
+Don't enable both modules for the same user. Each running daemon keeps about 1.1–1.2 GB (see DESIGN.md Measurements) of model resident.
 
 ### Without Nix
 
