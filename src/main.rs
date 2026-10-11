@@ -4,24 +4,17 @@ use std::process::exit;
 
 use clap::{Args, Parser, Subcommand};
 
-#[allow(dead_code)]
 mod audio;
 use protocol::{Request, Source};
 
 mod client;
-#[allow(dead_code)] // TODO(wiring todo): remove once `serve` calls config::load.
 mod config;
-#[allow(dead_code)]
 mod engine;
-#[allow(dead_code)]
 mod mic;
-#[allow(dead_code)]
 mod postprocess;
-#[allow(dead_code)]
 mod protocol;
-#[allow(dead_code)]
+mod server;
 mod session;
-#[allow(dead_code)]
 mod sys;
 
 /// Local speech-to-text daemon and client.
@@ -112,7 +105,10 @@ fn main() {
     let socket = socket_path(&cli);
     let out = &mut io::stdout();
     let result = match cli.command {
-        Command::Serve => todo!(),
+        Command::Serve => {
+            let cfg = cli.config.unwrap_or_else(config::default_path);
+            server::serve(&cfg, &socket)
+        }
         Command::Record(args) => client::record(&socket, args.start(), out),
         Command::Stop => client::control(&socket, Request::Stop { session: None }),
         Command::Cancel => client::control(&socket, Request::Cancel { session: None }),

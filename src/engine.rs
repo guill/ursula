@@ -19,6 +19,7 @@ pub enum EngineEvent {
     /// Final, never-revised text; `start`/`end` in seconds from session start.
     Segment { text: String, start: f32, end: f32 },
     /// Reserved for a future streaming engine; never emitted in v1.
+    #[expect(dead_code, reason = "no v1 engine emits partials")]
     Partial { text: String },
 }
 
