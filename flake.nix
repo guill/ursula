@@ -41,7 +41,24 @@
         let
           s = perSystem system;
         in
-        s.models // { default = s.ursula; }
+        s.models
+        // {
+          default = s.ursula;
+        }
+        # Opt-in CUDA build; cudaSupport is scoped to pkgsCuda, never global.
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          ursula-cuda =
+            let
+              pkgsCuda = import nixpkgs {
+                inherit system;
+                config = {
+                  allowUnfree = true;
+                  cudaSupport = true;
+                };
+              };
+            in
+            pkgsCuda.callPackage ./nix/package.nix { craneLib = crane.mkLib pkgsCuda; };
+        }
       );
 
       devShells = forSystems (
