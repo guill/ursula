@@ -3,6 +3,8 @@ use std::process::exit;
 
 use clap::{Args, Parser, Subcommand};
 
+#[allow(dead_code)]
+mod audio;
 #[allow(dead_code)] // TODO(wiring todo): remove once `serve` calls config::load.
 mod config;
 #[allow(dead_code)]
