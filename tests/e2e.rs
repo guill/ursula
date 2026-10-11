@@ -3,7 +3,10 @@
 //! Model-backed tests need `URSULA_E2E_MODEL_DIR` and `URSULA_E2E_VAD`; without them they
 //! print `skipped: <reason>` and pass. `harness_timeout` and `cli_smoke` need nothing.
 //! The fake-mic `mic_` tests (todo 13) additionally need `URSULA_E2E_PULSE=1`.
+//! `bench` (todo 14) is ignored; run it with `--ignored --nocapture`.
 
+#[path = "e2e/bench.rs"]
+mod bench;
 #[path = "e2e/cli.rs"]
 mod cli;
 #[path = "e2e/control.rs"]

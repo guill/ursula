@@ -164,9 +164,13 @@ impl Daemon {
         c.expect("status", IO_TIMEOUT)
     }
 
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Thread count of the daemon process.
     pub fn threads(&self) -> usize {
-        let task = format!("/proc/{}/task", self.child.id());
+        let task = format!("/proc/{}/task", self.pid());
         fs::read_dir(task).expect("read /proc task").count()
     }
 

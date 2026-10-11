@@ -62,7 +62,20 @@ These are suggestions based on my research, but if you have better ideas you sho
 | Memory | Model loaded at startup and kept resident. To free memory, stop the service. |
 | Model delivery | Nix fixed-output derivations, pinned by hash. Non-Nix users point config at a directory (a download script is provided). |
 | Service | systemd **user** service, which can reach the user's audio session and `$XDG_RUNTIME_DIR`. |
-| Performance target | None fixed. Benchmark stop-to-text latency and resident memory in M1 and record them here. |
+| Performance target | None fixed. Stop-to-text latency and resident memory are recorded under [Measurements](#measurements). |
+
+## Measurements
+
+Measured on 2026-10-11 via the e2e bench (`cargo test --test e2e bench -- --ignored --nocapture`): a debug build of ursula, with inference running in the release-built sherpa-onnx/onnxruntime libraries. Each of 5 runs pushes `test_wavs/0.wav` (7.4 s) at real-time pace (one 100 ms chunk every 100 ms) with `stream: false` and no post-processors, then sends `stop`. Latency is wall time from `stop` to `done`. Memory comes from `/proc/<pid>/status` in MiB: idle RSS once the socket is ready, peak `VmHWM` after the runs. The desktop was otherwise lightly loaded (load average ~2).
+
+| Item | Value |
+|---|---|
+| CPU | AMD Ryzen 7 7700X 8-Core Processor |
+| Threads (`model.threads`) | 4 |
+| Model | `parakeet-tdt-0.6b-v2-int8` |
+| Stop-to-text, median / min / max | 108 / 108 / 115 ms |
+| Idle RSS | 1097 MiB |
+| Peak RSS (`VmHWM`) | 1151 MiB |
 
 ## Architecture
 
@@ -258,7 +271,7 @@ Flake outputs:
 
 M1–M4 and the `silence_stop_ms` and CUDA package items of M5 are implemented. Hotwords (blocked upstream) and the Nemotron engine are not.
 
-1. **Core:** `ursula serve` plus `file` and `push` sources, VadOfflineEngine, the NDJSON protocol, the CLI, and the flake package and devShell. Measure latency and RSS on target hardware and record them here.
+1. **Core:** `ursula serve` plus `file` and `push` sources, VadOfflineEngine, the NDJSON protocol, the CLI, and the flake package and devShell. Latency and RSS are recorded under [Measurements](#measurements).
 2. **Mic:** libpulse capture, stop/cancel/toggle, max duration, stall detection, platform validation on real PipeWire and WSL2 (WSLg) pending (see Risks).
 3. **Service:** home-manager and NixOS modules, post-processors, config hotword list.
 4. **Clients:** NeoVim reference plugin, example WM bindings.
@@ -270,7 +283,7 @@ M1–M4 and the `silence_stop_ms` and CUDA package items of M5 are implemented. 
 - **WSL2 microphone:** WSLg exposes the Windows mic as PulseAudio source `RDPSource`. There is no ALSA, and the Windows mic privacy setting must allow desktop apps. Recent open WSLg issues (#1482, #1508) report capture stalls. Mitigations are stall detection plus a clear error. A possible fallback is a small Windows-side capture tool that uses the `push` source. Not in v1.
 - **Platform validation pending:** real PipeWire and WSLg microphones are untested by automation. Mic behaviour is tested only against a headless PulseAudio fed from a WAV file.
 - **Opening the mic on demand** may clip the first ~50–100 ms of speech while the stream opens. Measure in M2. If it's a problem, add a short configurable keep-open linger after each session rather than recording all the time.
-- **Memory:** there is no published figure for int8 Parakeet resident memory; estimated at ~0.7–1 GB. Measure in M1.
+- **Memory:** there is no published figure for int8 Parakeet resident memory; it was estimated at ~0.7–1 GB. The measured figure is somewhat higher, see [Measurements](#measurements).
 - **Simplifications** (known ceilings, upgrade path in parentheses):
   - Push input is 16 kHz s16le only (add a `rate` field and resample).
   - File input is 16 kHz WAV only (resample or decode other formats).
