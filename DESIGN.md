@@ -92,13 +92,29 @@ These are suggestions based on my research, but if you have better ideas you sho
   enum EngineEvent { Segment { text: String, start: f32, end: f32 }, Partial { text: String } }
   ```
   `VadOfflineEngine` is the only v1 implementation. A Nemotron `OnlineRecognizer` engine would emit `Partial` and `Segment` events without any API change.
-- **Threads:** one inference thread owns the recognizer (the model is never shared). The audio thread feeds it through a channel. Socket handling uses std threads (`std::os::unix::net`); there are too few clients to justify an async runtime.
-- **Mic lifecycle:** open the PulseAudio record stream on `start`, close it on `stop`/`cancel`/`done`. If the stream errors or delivers no data for 2 s, end the session with `error: audio_unavailable` and keep the daemon running. This matters for the WSLg regressions noted below.
-- **Session ownership:** the session's events go to the connection that sent `start`. `stop` and `cancel` are accepted from **any** connection, because there is only one session. This lets a WM toggle keybinding run as two separate processes (see CLI). If the owning connection drops, the session is cancelled so the mic is never left open.
+- **Threads:** one controller thread owns the engine (the model is never shared) and the session state machine. Each connection has a reader thread and a writer thread. Feeder threads (file/push) and the mic capture thread send audio into the controller. Post-processors run on their own threads. Supervision ticks (open timeout, stall detection, mic worker) run inside the controller loop, every 100 ms of idle time and after every input; no tick messages are queued. Everything uses std threads (`std::os::unix::net`); there are too few clients to justify an async runtime.
+- **Request ordering:** requests from one connection are processed strictly in the order sent, interleaved with feeder audio through ONE bounded ingress FIFO. Pushed audio therefore always reaches the engine before a later `stop` from the same connection.
+- **Session states:** `Idle`, `Opening` (mic only, before the stream is ready), `Recording`, `Finishing` (post-processors running). `status.busy` is true in every state except `Idle`. A session has **exactly one terminal event**: `done`, `cancelled`, or an in-session `error`. After it, late input for that session (samples, EOF, failure, post-processor result) is ignored.
+
+  | State | `stop` | `cancel` |
+  |---|---|---|
+  | Idle | `error no_session` | `error no_session` |
+  | Opening | `ack`, then `cancelled` to the owner | `ack`, then `cancelled` to the owner |
+  | Recording | `ack`, finalize, then `done` | `ack`, then `cancelled` |
+  | Finishing | `ack` (idempotent) | `ack`, kills the running post-processor, `cancelled`, no `done` |
+
+- **Connection teardown:** a *half-close* (read EOF, `shutdown(SHUT_WR)`) means "no more requests" and does **not** cancel. An idle connection is flushed and closed; an owner's session runs to its terminal event, which is delivered before the connection closes. A *full close* (POLLHUP), a write error, or a slow reader whose 1024-event outbound queue is full cancels the owned session silently and closes the connection. A duplicated descriptor held by a child process keeps the peer alive. This lets `printf ... | ursula raw` finish finite sessions, while a killed `ursula record` still closes the mic within about 200 ms.
+- **Responsiveness under load** (design choices, not real-time guarantees): `status` is answered out-of-band by the connection's reader from a shared snapshot, so it is not ordered against that connection's earlier requests. A `cancel`, or a full close of the owner, sets a per-session hint that the controller checks before every 512-sample step; queued audio of that session is then dropped without decoding. A `cancel` queued behind blocked audio on the same connection is head-of-line blocked, so clients should cancel from a separate connection (as `ursula cancel` does). `stop` is ordered behind its own connection's queued audio.
+- **Mic lifecycle:** open the PulseAudio record stream on `start`, close it on `stop`/`cancel`/`done`. If the stream errors or delivers no data for 2 s, end the session with `error: audio_unavailable` and keep the daemon running. This matters for the WSLg regressions noted below. After a stall the capture thread may be stuck in a blocking read; new mic sessions are refused (`audio_unavailable`) until it exits, so there is **at most one live mic reader** at any time.
+- **Session ownership:** the session's events go to the connection that sent `start`. `stop` and `cancel` are accepted from **any** connection, because there is only one session. Both take an optional `"session"`; if it doesn't match the active session the reply is `error no_session`. This lets a WM toggle keybinding run as two separate processes (see CLI). If the owning connection drops, the session is cancelled so the mic is never left open.
 
 ## API
 
-Transport: connect to `$XDG_RUNTIME_DIR/ursula.sock`. Every message is one JSON object per line. Requests may carry an optional `"id"`, which is echoed on the replies to that request.
+Transport: connect to `$XDG_RUNTIME_DIR/ursula.sock`. Every message is one JSON object per line. Requests may carry an optional `"id"`, echoed as follows:
+- `error`, `ack` and `status` replies carry the `id` of the request they answer.
+- All lifecycle events of a session (`started`, `segment`, `done`, `cancelled`, and in-session `error`) carry the `id` of its `start` request, if it had one.
+
+Limits and bad requests: a request line may be at most 1 MiB (excluding the `\n`). A longer line gets `error bad_request "line too long"` and the connection is closed, which cancels any session it owns. Invalid JSON or an unknown `op` gets `bad_request` and the connection stays open. For `audio`: from a non-owner → `bad_request`; with no session → `no_session`; for a non-push session → `bad_request`; bad base64 or an odd byte count → a session-ending `error bad_audio`.
 
 ### Requests (client → daemon)
 
@@ -110,9 +126,13 @@ Transport: connect to `$XDG_RUNTIME_DIR/ursula.sock`. Every message is one JSON 
  "hotwords": ["NixOS", "sherpa-onnx"],
  "context": "Editing a Rust file about audio capture.",
  "postprocess": ["cleanup"],    // names from config, run in order
- "max_ms": 120000,              // hard cap; default from config
- "silence_stop_ms": 1500}       // optional, nice-to-have: auto-stop after trailing silence
+  "max_ms": 120000,              // hard cap; default from config
+  "silence_stop_ms": 1500}       // optional: auto-stop after trailing silence
 ```
+
+- `max_ms` is the duration of *accepted audio*, counted in samples, not wall time. The effective cap is `min(request.max_ms, config.session.max_ms)`. Samples past the cap are dropped and the session finishes with `reason: max_duration`. `max_ms` ≤ 0 is `bad_request`.
+- `silence_stop_ms` is measured in sample time and applies to all sources. Audio is split into 512-sample steps whatever the wire chunking, and the session finishes with `reason: silence` once at least one speech window has been seen and the samples since the last speech window reach `silence_stop_ms`. The VAD's own `min_silence_ms` hang-over is included in that measurement. It never fires before the first speech, and results agree within ±512 samples across chunkings.
+- `started` readiness: for `mic`, a session id is reserved and the state is `Opening` (busy) until the PulseAudio stream is open; only then is `started` sent. If opening fails or takes more than 2 s, the session ends with a terminal `error audio_unavailable` (with `session`) and `started` is never sent. File and push sessions send `started` right after validation.
 
 **`audio`**: only for `source: "push"`. The payload is base64-encoded **16 kHz mono s16le** PCM.
 ```json
@@ -124,7 +144,10 @@ Transport: connect to `$XDG_RUNTIME_DIR/ursula.sock`. Every message is one JSON 
 **`status`**: returns daemon state.
 ```json
 {"op": "stop"}   {"op": "cancel"}   {"op": "status"}
+{"op": "stop", "session": "s-17"}   // optional target; mismatch → error no_session
 ```
+
+`stop` and `cancel` are answered with an `ack` event to the sender, then the session's terminal event goes to its owner (if the sender is the owner it receives both, `ack` first).
 
 For `{"file": ...}` sources, the session ends on its own at end of file. v1 accepts only 16 kHz mono 16-bit PCM WAV and rejects anything else with a `bad_audio` error that suggests an `ffmpeg` command. Push and file inputs feed audio faster than real time, so file transcription is fast.
 
@@ -142,10 +165,13 @@ For `{"file": ...}` sources, the session ends on its own at end of file. v1 acce
  "reason": "stop",                      // stop | silence | max_duration | end_of_file
  "warnings": ["hotwords ignored: not enabled for this model"]}
 {"event": "cancelled", "session": "s-17"}
-{"event": "status", "model": "parakeet-tdt-0.6b-v2", "busy": false, "version": "0.1.0",
- "capabilities": {"hotwords": false, "partials": false}}
-{"event": "error", "code": "busy", "message": "a session is already active"}
+{"event": "ack", "op": "stop", "session": "s-17", "id": 7}   // reply to stop/cancel
+{"event": "status", "model": "parakeet-tdt-0.6b-v2", "busy": false, "session": null, "version": "0.1.0",
+  "capabilities": {"hotwords": false, "partials": false}}
+{"event": "error", "code": "busy", "session": "s-17", "message": "a session is already active"}
 ```
+
+Session ids are `s-<n>` with `n` a counter starting at 1. `status.session` is the active id or `null`. The `busy` error carries the active session id, so a toggle can't stop the wrong session. In stream mode, segments produced by the final flush are emitted as `segment` events before `done`. `audio_ms` is `floor(accepted_samples * 1000 / 16000)`; padding is never counted. A session with no speech ends with `done` and `text: ""`, `segments: []`.
 
 Error codes: `busy`, `no_session`, `bad_request`, `bad_audio`, `audio_unavailable`, `unknown_postprocessor`. Post-processor failure is **not** an error, so speech is never lost: `done` still carries the last good text plus a warning.
 
@@ -173,6 +199,8 @@ The CLI is a thin client over the same socket. It covers use cases 2 and 3 witho
 | `ursula status` | Print the status JSON. |
 | `ursula raw` | Pipe NDJSON from stdin to the socket and print events, for debugging. |
 
+Global flags (before or after the subcommand): `--socket PATH` (default `$XDG_RUNTIME_DIR/ursula.sock`) and `--config PATH` (used by `serve`; default `$XDG_CONFIG_HOME/ursula/config.toml`). `--stream` conflicts with `--post`: streamed segments are final and never revised, so they can't also be post-processed. Errors go to stderr with exit status 1 (e.g. `stop` with no session prints the `no_session` error). The daemon holds `<socket>.lock` (never unlinked) so only one runs per socket; a stale socket file is replaced only if it really is a socket.
+
 Example WM binding for use case 3: `ursula toggle | wtype -` (or `xdotool type --file -`). The first press records; the second press makes that same process print and pipe the text.
 
 ### NeoVim (reference client)
@@ -194,7 +222,7 @@ provider = "cpu"                 # "cuda" needs the ursula-cuda package
 model = "/nix/store/...-silero-vad/silero_vad.onnx"
 threshold = 0.5
 min_silence_ms = 500
-max_speech_ms = 20000            # longer speech is force-split into segments
+max_speech_ms = 20000            # hard split: no decoded segment exceeds this (engine slices PCM before decoding)
 
 [session]
 max_ms = 300000
@@ -214,14 +242,16 @@ timeout_ms = 10000
 Flake outputs:
 - `packages.default`: `ursula`, built against nixpkgs `sherpa-onnx` with `SHERPA_ONNX_LIB_DIR` set and the crate's `shared` feature. Without that, the crate's `build.rs` downloads binaries and fails in the sandbox.
 - `packages.ursula-cuda`: the same, against `sherpa-onnx.override { cudaSupport = true; }`. This is unfree and slow to build without a CUDA cache.
-- `packages.models.{parakeet-tdt-0.6b-v2-int8, parakeet-tdt-0.6b-v3-int8, silero-vad}`: fixed-output derivations of the pinned sherpa-onnx release tarballs.
+- `packages.<system>.{parakeet-tdt-0_6b-v2-int8, parakeet-tdt-0_6b-v3-int8, silero-vad}`: fixed-output derivations of the pinned sherpa-onnx release tarballs. The names are flat because flakes reject nested package sets.
 - `apps.default`: `nix run` starts `ursula serve` with a generated default config.
 - `devShells.default`: Rust toolchain, `sherpa-onnx`, `libpulseaudio`, `pkg-config`, the env vars, and model paths exported.
-- `homeManagerModules.default`: `services.ursula = { enable; package; model; settings; }`. It generates the config and a systemd user unit.
-- `nixosModules.default`: the same options, defining `systemd.user.services.ursula` for all users.
+- `homeManagerModules.default`: `services.ursula = { enable; package; model; settings; autoStart; }`. It generates the config and a systemd user unit. `autoStart` (default `true`) controls whether the unit is wanted by `default.target`.
+- `nixosModules.default`: the same options, but `autoStart` defaults to `false` (run `systemctl --user start ursula`), defining `systemd.user.services.ursula` for all users.
 - `checks`: build, `cargo test`, and an end-to-end test that runs `ursula file` on a bundled sample WAV and asserts the expected text.
 
 ## Milestones
+
+M1–M4 and the `silence_stop_ms` and CUDA package items of M5 are implemented. Hotwords (blocked upstream) and the Nemotron engine are not.
 
 1. **Core:** `ursula serve` plus `file` and `push` sources, VadOfflineEngine, the NDJSON protocol, the CLI, and the flake package and devShell. Measure latency and RSS on target hardware and record them here.
 2. **Mic:** libpulse capture, stop/cancel/toggle, max duration, stall detection, tested on NixOS (PipeWire) and WSL2 (WSLg).
@@ -233,9 +263,11 @@ Flake outputs:
 
 - **Hotwords on Parakeet TDT:** sherpa-onnx supports NeMo-transducer hotwords via `modified_beam_search`, but two things block it today. The published model packages lack the required `bpe.vocab`, which would have to be generated with upstream `scripts/nemo/generate_bpe_vocab.py` and shipped in the model derivation. There is also an open bug where TDT plus `modified_beam_search` yields empty or "Yeah." output on about 20% of utterances (fix in k2-fsa/sherpa-onnx#3657, unmerged as of 2026-10). Hotwords therefore ship disabled. The API accepts them anyway, and they always reach post-processors.
 - **WSL2 microphone:** WSLg exposes the Windows mic as PulseAudio source `RDPSource`. There is no ALSA, and the Windows mic privacy setting must allow desktop apps. Recent open WSLg issues (#1482, #1508) report capture stalls. Mitigations are stall detection plus a clear error. A possible fallback is a small Windows-side capture tool that uses the `push` source. Not in v1.
+- **Platform validation pending:** real PipeWire and WSLg microphones are untested by automation. Mic behaviour is tested only against a headless PulseAudio fed from a WAV file.
 - **Opening the mic on demand** may clip the first ~50–100 ms of speech while the stream opens. Measure in M2. If it's a problem, add a short configurable keep-open linger after each session rather than recording all the time.
 - **Memory:** there is no published figure for int8 Parakeet resident memory; estimated at ~0.7–1 GB. Measure in M1.
 - **Simplifications** (known ceilings, upgrade path in parentheses):
   - Push input is 16 kHz s16le only (add a `rate` field and resample).
   - File input is 16 kHz WAV only (resample or decode other formats).
   - One session at a time (add per-session engines if ever needed).
+  - The VAD is **not reset** after a soft-bound flush (`max_speech_ms`). A reset Silero state needs about 0.8 s to re-detect ongoing speech, and that speech was lost; flush already empties the buffer. VAD sample indices are therefore session-absolute.
