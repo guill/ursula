@@ -6,6 +6,10 @@ Ursula is a local speech-to-text daemon for Linux (including WSL2). It keeps a P
 
 Speech is split by Silero VAD and each finished segment is decoded by the offline model. Everything runs on the CPU unless you opt into CUDA. See [DESIGN.md](DESIGN.md) for the protocol and the reasoning behind it.
 
+## Disclaimer
+
+ [DESIGN.md](DESIGN.md) was written entirely either by a human or with heavy human oversight. Everything else in this repository was written by agents based on that document with little human oversight. Use at your own risk.
+
 ## Install
 
 ### Nix
