@@ -143,7 +143,7 @@ require("ursula").setup({
 vim.keymap.set({ "n", "i" }, "<F9>", require("ursula").toggle)
 ```
 
-`setup` also defines `:Ursula toggle`, `:Ursula stop` and `:Ursula cancel`. Without post-processors each segment is inserted as it arrives. With them, the final text is inserted once at the end.
+`setup` also defines `:Ursula toggle`, `:Ursula stop` and `:Ursula cancel`. Without post-processors each segment is inserted as it arrives. With them, the final text is inserted once at the end. While recording, a red `●` (highlight group `UrsulaRecording`) shows in the top-right corner. After inserting, the cursor moves to the end of the text, so recording again appends.
 
 ## WSL2 notes
 

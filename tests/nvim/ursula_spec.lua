@@ -64,6 +64,31 @@ if post then
   check("postprocess: session finished", finished)
   check("postprocess: done.text inserted once at cursor", text == "POST<>", text)
   check("postprocess: no notifications", #notes == 0, vim.inspect(notes))
+
+  -- 2b. Staying in the buffer: cursor lands after the text, and a second
+  -- session from there appends instead of prepending.
+  vim.cmd("enew")
+  buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "<>" })
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  local function once()
+    vim.cmd("Ursula toggle")
+    local floats = vim.tbl_filter(function(w)
+      return vim.api.nvim_win_get_config(w).relative ~= ""
+    end, vim.api.nvim_list_wins())
+    check("indicator: shown while recording", #floats == 1)
+    vim.wait(60000, function()
+      return not ursula.active()
+    end, 20)
+  end
+  once()
+  check("cursor: after inserted text", vim.api.nvim_win_get_cursor(0)[2] == 4, vim.inspect(vim.api.nvim_win_get_cursor(0)))
+  once()
+  check("append: second session appends", text_of(buf) == "POSTPOST<>", text_of(buf))
+  local floats = vim.tbl_filter(function(w)
+    return vim.api.nvim_win_get_config(w).relative ~= ""
+  end, vim.api.nvim_list_wins())
+  check("indicator: hidden when idle", #floats == 0)
 end
 
 -- 3. Connect failure: an ERROR notification, buffer unchanged.
