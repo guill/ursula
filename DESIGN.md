@@ -77,6 +77,30 @@ Measured on 2026-10-11 via the e2e bench (`cargo test --test e2e bench -- --igno
 | Idle RSS | 1097 MiB |
 | Peak RSS (`VmHWM`) | 1151 MiB |
 
+### CPU vs GPU (`ursula-cuda`)
+
+Measured on 2026-10-12 on the same machine, now with release builds from the flake: `packages.default` for CPU and `packages.ursula-cuda` for GPU. The GPU is an NVIDIA GeForce RTX 4090 (driver 591.86) reached through WSL2. Every run used `parakeet-tdt-0.6b-v2-int8`, `threads = 4` and one daemon at a time. The load average was 0.6–1.5 before each set.
+
+Latency is the wall time of `ursula file` (client start to exit), measured after one warm-up. The short clip is `test_wavs/0.wav` (7.4 s, 5 runs). The long clip is that file concatenated 10 times (74.35 s, 3 runs). The real-time factor (RTF) is processing time / audio duration, using the median. Memory is from `/proc/<pid>/status` in MiB: idle once the socket answered, and `VmHWM` after all runs. All three configurations produced the same transcript.
+
+| | CPU (`default`) | `ursula-cuda`, `provider = "cpu"` | `ursula-cuda`, `provider = "cuda"` |
+|---|---|---|---|
+| 7.4 s clip, min / median / max | 302 / 306 / 313 ms | 307 / 313 / 321 ms | 425 / 428 / 456 ms |
+| 74.35 s clip, min / median / max | 2708 / 2725 / 2818 ms | 2700 / 2798 / 2800 ms | 4693 / 4729 / 4799 ms |
+| RTF, 74.35 s clip (median) | 0.037 | 0.038 | 0.064 |
+| Model load (daemon log, 1 sample) | 1377 ms | 1584 ms | 2039 ms |
+| Idle RSS | 1062 MiB | 1081 MiB | 1604 MiB |
+| Peak RSS (`VmHWM`) | 1117 MiB | 1136 MiB | 1793 MiB |
+| GPU memory | — | — | ~564 MiB (device total fell by this much when the daemon was killed) |
+
+Notes:
+
+- The CUDA provider really ran, but it is **slower** than the CPU for this int8 model. The daemon mapped `libonnxruntime_providers_cuda.so`, cuBLAS, cuDNN and WSL's `libcuda.so.1`, held `/dev/dxg` open, and allocated GPU memory. During one long-clip run, though, it still kept ~4.9 cores busy (21.4 s CPU time vs 13.2 s with `provider = "cpu"`), and GPU utilization stayed at 7–34%. This matches onnxruntime running the int8 quantized ops on the CPU and copying tensors between host and device. That explanation was not confirmed with an onnxruntime profile. An fp32 model may behave differently and was not measured.
+- On the CPU, `ursula-cuda` with `provider = "cpu"` matches the default package within noise. The CUDA build therefore costs nothing on machines without a GPU, apart from the larger closure and ~20 MiB more RSS.
+- `ursula-cuda` has to be built from source: cache.nixos.org does not cache unfree CUDA builds. The nix build (CUDA-enabled onnxruntime and sherpa-onnx) took about 4.4 h on this 16-thread machine with `--cores 4 --max-jobs 1`.
+- The package is opt-in. It is never part of `packages.default`, `apps`, the modules' default `package`, or `checks`.
+- Under WSL2 the binary needs `/usr/lib/wsl/lib` (WSL's `libcuda.so.1`) on `LD_LIBRARY_PATH`.
+
 ## Architecture
 
 ```

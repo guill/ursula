@@ -159,6 +159,8 @@ services.ursula.package = ursula.packages.x86_64-linux.ursula-cuda;
 services.ursula.settings.model.provider = "cuda";
 ```
 
+The package is not in any binary cache, so expect a long build: about 4.4 h on a 16-thread desktop with `--cores 4 --max-jobs 1`. With the bundled int8 models it measured slower than the CPU build on an RTX 4090 (see [CPU vs GPU](DESIGN.md#cpu-vs-gpu-ursula-cuda) in DESIGN.md). The driver's `libcuda.so.1` must be visible to the daemon. On WSL2 that means `LD_LIBRARY_PATH=/usr/lib/wsl/lib`; elsewhere, your system's libcuda path.
+
 ## Post-processors
 
 A post-processor is a command from the config. It receives one JSON object on stdin and must print one JSON object on stdout. It runs once per finished session, chained in order, and only on the final text. A non-zero exit, bad JSON, or a timeout skips it with a warning, so speech is never lost.
