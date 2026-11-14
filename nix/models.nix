@@ -20,8 +20,8 @@ let
     };
 in
 {
-  parakeet-tdt-0_6b-v2-int8 = tarball "parakeet-tdt-0.6b-v2-int8" "sha256-FXwVe8URVeA+N9JGZSKjpzfdnHK7JfNusYkSlkFh4a0=";
-  parakeet-tdt-0_6b-v3-int8 = tarball "parakeet-tdt-0.6b-v3-int8" "sha256-V5PQ/Tl8V3jSzyEmmU1Y6dVrG+fATRPHoVuxtOr7Fr8=";
+  parakeet-tdt-0_6b-v2-int8 = tarball "parakeet-tdt-0.6b-v2-int8" "sha256-b8RCa1SqVJoAGbinW43qWRZOcXkKN6xWoEWtV/kV9xQ=";
+  parakeet-tdt-0_6b-v3-int8 = tarball "parakeet-tdt-0.6b-v3-int8" "sha256-FJXpG1nX/FPdypHzQxdY7Jn4+iU/2w4ehRvg9ysUsPk=";
   silero-vad = stdenvNoCC.mkDerivation {
     name = "silero-vad";
     src = fetchurl {
